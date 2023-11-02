@@ -1,0 +1,6 @@
+ipykernel
+ipywidgets
+matplotlib
+pysolotools
+lightning
+timm
