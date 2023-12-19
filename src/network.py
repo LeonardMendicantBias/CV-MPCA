@@ -96,6 +96,7 @@ class CVMPCA(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         image_dict, object_list = batch
+
         cat_list, position_list, los_list = self(image_dict)  # (B, L, n_query, C/3/S)
         # prediction_list = [(cat, pos, los) for cat, pos, los in zip(cat_list, position_list, los_list)]
         losses = self.loss(object_list, (cat_list, position_list, los_list))
@@ -155,10 +156,14 @@ class SingleView(nn.Module):
         )
 
         # TODO: use depth prediction
-        # self.depth_predictor = nn.Sequential(
-        #     nn.Conv2d(64, 1, kernel_size=1, stride=1),
-        #     nn.Softmax()  # perform softmax on each spatial location
-        # )
+        self.depth_predictors = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.embed_dim, 1, kernel_size=1, stride=1),
+                nn.Softmax()  # perform softmax on each spatial location
+            )
+            for _ in self.embed_dims
+        ])
+        
 
     def forward(self, x):
         xs = [x:=stage(x) for stage in self.swin]
@@ -166,8 +171,12 @@ class SingleView(nn.Module):
             f'feat{i}': x.permute(0, 3, 1, 2)
             for i, x in enumerate(xs)
         })
+        depths = {
+            key: depth_layer(item).squeeze(1)
+            for (key, item), depth_layer in zip(xs.items(), self.depth_predictors)
+        }
 
-        return xs
+        return xs, depths
     
 
 class Decoder(nn.Module):
@@ -320,9 +329,7 @@ class MHCA(nn.Module):
         self.attention_weights = nn.Linear(embed_dim, len(cameras))
         self.output_proj = nn.Linear(embed_dim, embed_dim)
 
-        self.register_buffer('pc_range',
-            torch.tensor(pc_range, dtype=torch.float)
-        )
+        self.register_buffer('pc_range', torch.tensor(pc_range, dtype=torch.float))
 
         self._init_weight()
 
@@ -371,3 +378,13 @@ class MHCA(nn.Module):
         output = output.sum(-2)#.sum(-2)#.sum(-1)
         output = self.output_proj(output)
         return self.dropout(output)
+
+
+
+class MyMHCA(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self):
+        pass
