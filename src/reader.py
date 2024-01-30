@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 
 from typing import Dict, List, Tuple, Optional, Callable, Any
@@ -33,6 +34,19 @@ import matplotlib.pyplot as plt
 from torchvision.datasets import VisionDataset
 from torch.utils.data import DataLoader
 
+# if to_matlab:
+    # savemat('./sbss.mat', {"position": np.array([
+    #     [8, 2.8, 6.5],
+    #     [8, 2.8, -6.5],
+    #     [1, 2.8, 6.5],
+    #     [1, 2.8, -6.5],
+    #     [-5, 2.8, 6.5],
+    #     [-5, 2.8, -6.5],
+    #     [-10.5, 2.8, 0],
+    # ])})
+    # savemat('./ues.mat', {"position": np.array(ue_pos), "blockage": np.ones((5, 9))})
+    # pass
+
 
 @dataclass
 class Object:
@@ -40,14 +54,16 @@ class Object:
     category: int
     position: Tuple[float]
     los: np.ndarray
+    required_rate: float
+    ca: np.ndarray
 
-    def __post_init__(self):
-        if not isinstance(self.category, Tensor):
-            self.category = torch.tensor(self.category, dtype=torch.float)
-        if not isinstance(self.position, Tensor):
-            self.position = torch.tensor(self.position, dtype=torch.float)
-        if not isinstance(self.los, Tensor):
-            self.los = torch.tensor(self.los, dtype=torch.float)
+    # def __post_init__(self):
+    #     if not isinstance(self.category, Tensor):
+    #         self.category = torch.tensor(self.category, dtype=torch.float)
+    #     if not isinstance(self.position, Tensor):
+    #         self.position = torch.tensor(self.position, dtype=torch.float)
+    #     if not isinstance(self.los, Tensor):
+    #         self.los = torch.tensor(self.los, dtype=torch.float)
     
     def distance(self, other, alphas=[1, 1, 1]):
         '''
@@ -71,7 +87,7 @@ class Object:
 
 class UnityDataset(VisionDataset):
 
-    def __init__(self, to_matlab=False, *args, **kwargs):
+    def __init__(self, min_req=1, max_req=10, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.samples = []
@@ -99,7 +115,7 @@ class UnityDataset(VisionDataset):
 
                 anno_3d = [
                     anno for anno in capture.annotations 
-                    if isinstance(anno, BoundingBox3DAnnotation)
+                    if isinstance(anno, BoundingBox3DAnnotation)# and anno.labelName == 'phone'
                 ][0]
                 if len(anno_3d.values) == 0: break
                 r = R.from_quat(capture.rotation)
@@ -110,7 +126,8 @@ class UnityDataset(VisionDataset):
                             instanceId=bbox.instanceId,
                             category=np.zeros(len(category_lookup)),
                             position=np.array(r.apply(bbox.translation)+capture.position),
-                            los=np.zeros(len(frame.captures))
+                            los=np.zeros(len(frame.captures)),
+                            required_rate=np.random.rand(1)*(max_req-min_req) + min_req
                         )
                     
                     # update UE's information
@@ -120,18 +137,6 @@ class UnityDataset(VisionDataset):
             else:
                 self.samples.append((paths, list(objects.values())))
 
-            if to_matlab:
-                # savemat('./sbss.mat', {"position": np.array([
-                #     [8, 2.8, 6.5],
-                #     [8, 2.8, -6.5],
-                #     [1, 2.8, 6.5],
-                #     [1, 2.8, -6.5],
-                #     [-5, 2.8, 6.5],
-                #     [-5, 2.8, -6.5],
-                #     [-10.5, 2.8, 0],
-                # ])})
-                # savemat('./ues.mat', {"position": np.array(ue_pos), "blockage": np.ones((5, 9))})
-                pass
             # if frame_idx == 1: break
         else:
             category_lookup['background'] = len(category_lookup)
@@ -155,8 +160,8 @@ class UnityDataset(VisionDataset):
         images = {key: Image.open(path).convert('RGB') for key, path in path_dict.items()}
         if self.transform is not None:
             images = {key: self.transform(image) for key, image in images.items()}
-        if self.target_transform is not None:
-            targets = self.target_transform(targets)
+        # if self.target_transform is not None:
+        targets = targets
 
         return path_dict, images, targets
     
@@ -199,76 +204,60 @@ class UnityMatDataset(VisionDataset):
         solo = Solo(data_path=self.root)
 
         # category_lookup = {'background': 0}
-        category_lookup = {}
-        category_lookup.update({v: k-1 for k, v in solo.categories().items()})
+        category_lookup = {v: k-1 for k, v in solo.categories().items()}
         
         capture_lookup = {}
 
         for frame_idx, frame in enumerate(solo.frames()):
-            paths = {
-                capture.id: f'{self.root}/sequence.{frame.sequence}/{capture.id}.mat'
+            print(f'\rLoading: {100*frame_idx/len(solo.frames()):.2f}%', end='')
+            img_paths ={
+                # capture.id: f'{self.root}/sequence.{frame.sequence}/{capture.id}.mat'
+                capture.id: f'{self.root}/sequence.{frame.sequence}/{capture.id}'
                 for capture in frame.captures
             }
+            obj_path = f'{self.root}/sequence.{frame.sequence}'
+            # objects = loadmat(f'{obj_path}/objects.mat')
+            if not os.path.isfile(f'{obj_path}/objects.mat'): continue
 
-            objects = {}
-            # for each camera
-            for capture in frame.captures:
-                # update camera2idx dictionary
-                if capture.id not in capture_lookup:
-                    capture_lookup[capture.id] = len(capture_lookup)
+            # if frame_idx == 2: break 
+            self.samples.append((img_paths, obj_path))
 
-                anno_3d = [
-                    anno for anno in capture.annotations 
-                    if isinstance(anno, BoundingBox3DAnnotation)
-                ][0]
-                if len(anno_3d.values) == 0: break
-                r = R.from_quat(capture.rotation)
-                for bbox in anno_3d.values:
-                    # add new UE
-                    if bbox.instanceId not in objects:
-                        objects[bbox.instanceId] = Object(
-                            instanceId=bbox.instanceId,
-                            category=np.zeros(len(category_lookup)),
-                            position=np.array(r.apply(bbox.translation)+capture.position),
-                            los=np.zeros(len(frame.captures))
-                        )
-                    
-                    # update UE's information
-                    objects[bbox.instanceId].category[category_lookup[bbox.labelName]] = 1
-                    # if capture has bbox, then it is in line of sight
-                    objects[bbox.instanceId].los[capture_lookup[capture.id]] = 1
-            else:
-                self.samples.append((paths, list(objects.values())))
-
-            print(f'\rLoading: {100*frame_idx/len(solo.frames()):.2f}%', end='')
-        else:
-            category_lookup['background'] = len(category_lookup)
-            print(f'\rDataset loaded succesfully.')
+            
+        # else:
+        category_lookup['background'] = len(category_lookup)
+        print(f'\rDataset loaded succesfully.')
 
         self.category_lookup = category_lookup
         self.capture_lookup = capture_lookup
         self.captures = frame.captures
 
+    def __len__(self) -> int: return len(self.samples)
+
     def __getitem__(self, index: int) -> Tuple[Dict[str, Image.Image], Object]:
-        path_dict, targets = self.samples[index]
+        img_paths, obj_path = self.samples[index]
         visual_features = {}  # [key, (M, D, H, W)]  # M: number of cameras
-        for key, path in path_dict.items():
-            mat_file = loadmat(path)
+        for key, path in img_paths.items():
+            mat_file = loadmat(f'{path}.mat')
             visual_features[key] = {
                 f'feat{i}': torch.tensor(mat_file[str(i)]).permute(2, 0, 1)
                 for i in range(4)  # load the extracted hierachical features
             }
         
-        if self.target_transform is not None:
-            targets = self.target_transform(targets)
+        obj = loadmat(f'{obj_path}/objects.mat')
+        objects = Object(
+            instanceId=torch.tensor(obj['instanceId'][0], dtype=torch.long),
+            category=torch.tensor(obj['category'], dtype=torch.float),
+            position=torch.tensor(obj['position'], dtype=torch.float),
+            los=torch.tensor(obj['los'], dtype=torch.float),
+            required_rate=torch.tensor(obj['required_rate'][:, 0], dtype=torch.float),
+            ca=torch.tensor(obj['ca'], dtype=torch.float),
+        )
 
-        return path_dict, visual_features, targets
-    
-    def __len__(self) -> int: return len(self.samples)
+        return visual_features, objects, obj['file_paths']
 
     @staticmethod
     def _collate_fn(data: List[Tuple[Dict[str, Image.Image], Object]]):
-        paths, feature_list, object_list = zip(*data)
+        feature_list, object_list, file_path_list = zip(*data)
 
         features = {}
         camera_keys = list(feature_list[0].keys())
@@ -282,7 +271,7 @@ class UnityMatDataset(VisionDataset):
                 for feat_key in feat_keys
             }
 
-        return features, object_list  # obj
+        return features, object_list, file_path_list
 
     @classmethod
     def from_unity(cls, root):
@@ -296,7 +285,7 @@ class UnityMatDataset(VisionDataset):
     def from_unity_to_loader(cls, root, batch_size=4, num_workers=0):
         return DataLoader(
             cls.from_unity(root=root),
-            batch_size=batch_size, num_workers=num_workers, shuffle=False,
+            batch_size=batch_size, num_workers=num_workers, shuffle=True,
             collate_fn=cls._collate_fn, pin_memory=True
         )
 

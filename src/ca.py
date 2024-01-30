@@ -13,61 +13,56 @@ def path_gain(dist, freq):      # dist in meters, freq in GHz
 
 def get_rate(channel, ant_num, noise_level):
     snr = np.sum(np.abs(channel)**2, axis=0)/noise_level
+    # print(snr)
     return np.log2(1+snr)
 
-def cell_association(distance, vis, freq, V_max, ant_num, noise_level):  # freq=100e9
-    M, K = distance.shape
-    channel = path_gain(distance, freq/1e9)[-1]*vis
-    
-    all_combs = []
-    for i in range(V_max, V_max + 1):
-        all_combs += list(CWOR(np.arange(K),i))
-    
-    possible_asso_num = len(all_combs)
-    all_asso = np.zeros([possible_asso_num, K])
-    for i in range(possible_asso_num):
-        all_asso[i, all_combs[i]] = 1
-
-    count = np.zeros(M, np.int)
-
-    cell_asso = np.zeros([M, K])
-    
-    ca = CWR(possible_asso_num, M)
-
-    for index in range(possible_asso_num**M):
-        count = ca[index]
-        for m in range(M):
-            cell_asso[m] = all_combs[count[m]]
-        channel_ = cell_asso*channel
-        R = sum_rate(channel_, ant_num, noise_level)
-        if R > max_rate:
-            max_cell_asso = copy.deepcopy(cell_asso)
-            max_rate = R
-
-    return max_cell_asso
+# def cell_association(distance, vis, freq, V_max, ant_num, noise_level):  # freq=100e9
+#     M, K = distance.shape
+#     channel = path_gain(distance, freq/1e9)[-1]*vis
+#     all_combs = []
+#     for i in range(V_max, V_max + 1):
+#         all_combs += list(CWOR(np.arange(K),i))
+#     possible_asso_num = len(all_combs)
+#     all_asso = np.zeros([possible_asso_num, K])
+#     for i in range(possible_asso_num):
+#         all_asso[i, all_combs[i]] = 1
+#     count = np.zeros(M, np.int)
+#     cell_asso = np.zeros([M, K])
+#     ca = CWR(possible_asso_num, M)
+#     for index in range(possible_asso_num**M):
+#         count = ca[index]
+#         for m in range(M):
+#             cell_asso[m] = all_combs[count[m]]
+#         channel_ = cell_asso*channel
+#         R = sum_rate(channel_, ant_num, noise_level)
+#         if R > max_rate:
+#             max_cell_asso = copy.deepcopy(cell_asso)
+#             max_rate = R
+#     return max_cell_asso
 
 def cell_association(required_rate, distance, vis, freq, V_max, ant_num, noise_level):  # freq=100e9
     M, K = distance.shape
-    channel = path_gain(distance, freq/1e9)[-1]*vis
-
-    _temp = np.zeros(K)
+    _channel = np.sqrt(path_gain(distance, freq/1e9)[-1]*vis)
+    # _temp = np.zeros(K)
     # association options for each SBS given V_max and K
     options = []
-    for ids in CWOR(np.arange(K), 2):
-        temp = _temp.copy()
-        temp[list(ids)] = 1
-        options.append(temp)
+    for i in range(V_max):
+        for ids in CWOR(np.arange(K), i+1):
+            temp = np.zeros(K) #_temp.copy()
+            temp[list(ids)] = 1
+            options.append(temp)
 
     # among all association options among M SBSs, find the best one
-    best_ca = None
     max_rate = -1
+    best_ca = None
     for ca in CWR(options, M):
-        channel_ = np.array(ca)*channel
-        rates = get_rate(required_rate, channel_, ant_num, noise_level)
-        if (R:=rates.sum()) > max_rate and (rates>=required_rate).all():
+        channel = np.array(ca)*_channel
+        rates = get_rate(channel, ant_num, noise_level)
+        if (R:=rates.sum()) > max_rate and (rates >= required_rate).all():
+        # if (R:=rates.sum()) > max_rate and (rates>0).all():
             max_rate = R
             best_ca = ca
-
+    # else:
     return best_ca
 
 
@@ -78,7 +73,7 @@ if __name__ == '__main__':
     max_asso = 2
     
     all_combs = []
-    for i in range(max_asso+1):
+    for i in range(max_asso + 1):
         all_combs += list(CWOR(np.arange(K),i))
     
     

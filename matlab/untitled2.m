@@ -17,8 +17,8 @@ plot(ue, two, 'm-*')
 plot(ue, three, 'b-diamond') 
 
 xlabel('Number of UE(s)')
-%ylabel('Distance error (cm)')
-ylabel('Detection rate (%)')
+ylabel('Distance error (cm)')
+%ylabel('Detection rate (%)')
 
 xticks(1:6);
 grid on
