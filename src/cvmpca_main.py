@@ -59,8 +59,8 @@ class DeformableMHA(nn.Module):
         for i in range(self.n_points):
             # grid_init[:, :, i, :] *= i + 1
             grid_init[:, i, :] *= i + 1
-        # with torch.no_grad():
-        self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
+        with torch.no_grad():
+            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
 
         nn.init.xavier_uniform_(self.output_proj.weight.data)
         nn.init.constant_(self.output_proj.bias.data, 0.)
@@ -196,6 +196,45 @@ class Block(nn.Module):
         x = x + self.stochastic_depth(self.mlp(self.mlp_norm(x)))
 
         return x
+
+
+class CVCA(pl.LightningModule):
+    
+    def __init__(self,
+        captures: List[Capture],
+        n_classes: int,
+        space: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]],
+        voxel_size: Tuple[float, float, float],
+        ratio: Union[int, List[int]],
+        target_ids: int
+    ):
+        super().__init__()
+        self.n_classes = n_classes
+        self.register_buffer('space', torch.tensor(space))
+        self.register_buffer('voxel_size', torch.tensor(voxel_size))
+        self.register_buffer('voxels', self._voxelize())
+
+        _cameras = {capture.id: utils.Camera.from_unity(capture) for capture in captures}
+        self.n_cameras = len(_cameras)
+        self.cameras = nn.ModuleDict(_cameras)
+
+        self.backbone = None
+        self.mhca = None
+        self.ca = None
+
+    def _voxelize(self):
+        space, voxel_size = self.space, self.voxel_size
+        X = torch.arange(space[0][0], space[0][1] + voxel_size[0]/4, voxel_size[0]) #, device=voxel_size.device)
+        Y = torch.arange(space[1][0], space[1][1] + voxel_size[1]/4, voxel_size[1]) #, device=voxel_size.device)
+        Z = torch.arange(space[2][0], space[2][1] + voxel_size[2]/4, voxel_size[2]) #, device=voxel_size.device)
+        
+        grid_x, grid_y, grid_z = torch.meshgrid(X, Y, Z, indexing='ij')
+        return torch.stack([grid_x.flatten(), grid_y.flatten(), grid_z.flatten()], dim=1)
+    
+    def forward(self, image_dicts: Dict[str, Dict[str, Tensor]]):
+        img_features = {cam: self.backbone(features) for cam, features in image_dicts.items()}
+
+        return 
 
 
 class CVMPCA(pl.LightningModule):

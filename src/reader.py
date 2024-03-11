@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 from dataclasses import dataclass
 
@@ -8,7 +9,7 @@ from PIL import Image
 
 from pysolotools.consumers import Solo
 from pysolotools.core.models import BoundingBox2DLabel, BoundingBox2DAnnotation
-from pysolotools.core.models import BoundingBox3DLabel, BoundingBox3DAnnotation
+from pysolotools.core.models import BoundingBox3DLabel, BoundingBox3DAnnotation as BBox3DAnno
 from pysolotools.core.models import Frame, Capture
 from scipy.spatial.transform import Rotation as R
 
@@ -34,46 +35,15 @@ import matplotlib.pyplot as plt
 from torchvision.datasets import VisionDataset
 from torch.utils.data import DataLoader
 
-# if to_matlab:
-    # savemat('./sbss.mat', {"position": np.array([
-    #     [8, 2.8, 6.5],
-    #     [8, 2.8, -6.5],
-    #     [1, 2.8, 6.5],
-    #     [1, 2.8, -6.5],
-    #     [-5, 2.8, 6.5],
-    #     [-5, 2.8, -6.5],
-    #     [-10.5, 2.8, 0],
-    # ])})
-    # savemat('./ues.mat', {"position": np.array(ue_pos), "blockage": np.ones((5, 9))})
-    # pass
+
+import wireless_env as nr
 
 
 @dataclass
 class Object:
-    instanceId: int
-    category: int
-    position: Tuple[float]
-    los: np.ndarray
-    required_rate: float
-    ca: np.ndarray
-
-    # def __post_init__(self):
-    #     if not isinstance(self.category, Tensor):
-    #         self.category = torch.tensor(self.category, dtype=torch.float)
-    #     if not isinstance(self.position, Tensor):
-    #         self.position = torch.tensor(self.position, dtype=torch.float)
-    #     if not isinstance(self.los, Tensor):
-    #         self.los = torch.tensor(self.los, dtype=torch.float)
-    
-    def distance(self, other, alphas=[1, 1, 1]):
-        '''
-            Measure the distance between two objects for Hungarian Matching
-        '''
-        # print(other.category, self.category)
-        cat_delta = F.binary_cross_entropy_with_logits(other.category, self.category)
-        pos_delta = F.mse_loss(other.position, self.position)
-        los_delta = F.binary_cross_entropy_with_logits(other.los, self.los)
-        return alphas[0]*cat_delta + alphas[1]*pos_delta + alphas[2]*los_delta
+    instanceId: str | List[str]
+    category: int | List[int]
+    position: np.ndarray | List[np.ndarray]
 
     @classmethod
     def batchify(cls, objects: List):
@@ -84,8 +54,185 @@ class Object:
             los=torch.stack([obj.los for obj in objects])
         )
 
+    @classmethod
+    def from_capture(cls, capture: Capture, category_lookup: Dict[str, int]) -> Object:
+        '''
+            visible objects in a capture/image
+        '''
+        anno = [anno for anno in capture.annotations if isinstance(anno, BBox3DAnno)][0]
+        if len(anno.values) == 0: return None
+
+        r = R.from_quat(capture.rotation)
+        return cls(
+            instanceId=[str(bbox.instanceId) for bbox in anno.values],
+            category=[category_lookup[bbox.labelName] for bbox in anno.values],
+            position=[
+                np.array(r.apply(bbox.translation)+capture.position)
+                for bbox in anno.values
+            ],
+        )
+
+
+@dataclass
+class UE(Object):
+    required_rate: float | List[float]
+    los: np.ndarray | List[np.ndarray]
+    ca: np.ndarray | List[np.ndarray]
+    
+    @staticmethod
+    def collate_fn(data: List[MultiViewSample]):
+        camera_keys = list(data[0].image_paths.keys())
+        return {
+            key: key
+            for key in camera_keys
+        }
+    
+    @classmethod
+    def from_frame(cls,
+        min_req: float, max_req: float,
+        power: float, N_h: int, N_v: int, freq: int,
+        V_max: int, noise: float,
+        frame: Frame,
+        category_lookup: Dict[str, int], capture_lookup: Dict[str, int]
+    ) -> UE:
+        object_dict = {
+            capture.id: Object.from_capture(capture, category_lookup)
+            for capture in frame.captures
+        }  # extract objects from each capture/image
+        instanceIds = set([idx for obj in object_dict.values() for idx in obj.instanceId if obj is not None])
+
+        # generate an placeholder UE
+        ues = cls(
+            instanceId=instanceIds,
+            category=np.zeros((len(instanceIds), len(category_lookup))),
+            position=np.zeros((len(instanceIds), 3)),
+            # required_rate=np.random.rand(1)*(max_req-min_req) + min_req,
+            required_rate=0,
+            los=np.zeros((len(instanceIds), len(frame.captures))),
+            ca=np.zeros((len(instanceIds), len(frame.captures))),  # ???
+        )  # K of UEs
+        
+        for i, idx in enumerate(instanceIds):
+            for camera_idx, objs in object_dict.items():
+                idx_ = objs.instanceId.index(idx) if idx in objs.instanceId else None
+                if idx_ is None: continue
+
+                ues.category[i] = objs.category[idx_]
+                ues.position[i] = objs.position[idx_]
+                ues.los[i, capture_lookup[camera_idx]] = 1
+
+        sbs_positions = np.array([capture.position for capture in frame.captures])
+        M, K = sbs_positions.shape[0], len(object_dict)
+
+        distance, theta, phi = nr.cart2sph(ues.position.reshape([1, K, 3]) - sbs_positions.reshape([M, 1, 3]))
+        perfect_aod = (theta, phi)
+        _, beam_gain = nr.AoD_to_beamgain(sbs_positions, ues.position, perfect_aod, power, ues.los.T, N_h, N_v, freq)
+        ues.ca = nr.cell_association(ues.required_rate, beam_gain, V_max, noise)
+    
+        return ues
+
+
+@dataclass
+class MultiViewSample:
+    # images: Dict[str, torch.Tensor]
+    image_paths: Dict[str, str] | List[Dict[str, str]]
+
+    @classmethod
+    def from_frame(cls, root: str, frame: Frame):
+        return cls(
+            image_paths={
+                capture.id: f'{root}/sequence.{frame.sequence}/step0.{capture.id}.png'
+                for capture in frame.captures
+            }
+        )
+
+@dataclass
+class MultiViewSampleDS(MultiViewSample):
+    images: torch.Tensor
+    
+    @classmethod
+    def collate_fn(cls, data: List[MultiViewSample]):
+        keys = list(data[0].image_paths.keys())
+        return cls(
+
+        )
+    
+    @classmethod
+    def from_mv_sample(cls, mv_sample: MultiViewSample, transform: T.Compose=None):
+        images = {key: Image.open(path).convert('RGB') for key, path in mv_sample.image_paths.items()}
+        if transform is not None:
+            images = {key: transform(image) for key, image in images.items()}
+        return cls(
+            image_paths=mv_sample.image_paths,
+            images=images
+        )
+
 
 class UnityDataset(VisionDataset):
+
+    def __init__(self, min_req=1, max_req=10, *args, is_parallel, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.is_parallel = is_parallel
+        self.min_req, self.max_req = min_req, max_req
+
+        self.samples = []
+        solo = Solo(data_path=self.root)
+        for frame in solo.frames(): pass
+        self.capture_lookup = {}
+        for capture in frame.captures:
+            self.capture_lookup[capture.id] = len(self.capture_lookup)
+        self.category_lookup = {v: k-1 for k, v in solo.categories().items()}
+
+        # if is_parallel: map_fn = map
+        # else: map_fn = map
+        # self.samples = [item for item in map(self._read_frame, solo.frames()) if item is not None]
+        
+        for frame_idx, frame in enumerate(solo.frames()):
+            print(f'\rLoading: {100*frame_idx/len(solo.frames()):.2f}%', end='')
+            self.samples.append((
+                MultiViewSample.from_frame(self.root, frame),
+                UE.from_frame(min_req, max_req, frame, self.category_lookup, self.capture_lookup)
+            ))
+            if frame_idx == 4: break
+        else:
+            print(f'\rDataset loaded succesfully.')
+
+        self.category_lookup['background'] = len(self.category_lookup)
+        
+    def _read_frame(self, frame: Frame):
+        mv_imgs = MultiViewSample.from_capture(self.root, frame)
+        ues = UE.from_frame(self.min_req, self.max_req, frame, self.category_lookup, self.capture_lookup)
+        return mv_imgs, ues
+
+    def __getitem__(self, index: int) -> MultiViewSample:
+        path_dict, targets = self.samples[index]
+        return MultiViewSampleDS.from_mv_sample(path_dict, self.transform), targets
+
+    def __len__(self) -> int: return len(self.samples)
+
+    @staticmethod
+    def _collate_fn(data: List[Tuple[Dict[str, Image.Image], Object]]):
+        image_list, object_list = zip(*data)
+
+        return MultiViewSampleDS.collate_fn(image_list), Object.collate_fn(object_list)
+    
+    @classmethod
+    def from_unity(cls, root, min_req, max_req, is_parallel=False):
+        return cls(
+            root=root, min_req=min_req, max_req=max_req, is_parallel=is_parallel,
+            transform=Swin_V2_T_Weights.DEFAULT.transforms(),
+            target_transform=Object.batchify
+        )
+
+    @classmethod
+    def from_unity_to_loader(cls, root, min_req=0, max_req=0, batch_size=4, num_workers=0):
+        return DataLoader(
+            cls.from_unity(root=root, min_req=min_req, max_req=max_req, is_parallel=num_workers!=0),
+            batch_size=batch_size, num_workers=num_workers, shuffle=True,
+            collate_fn=cls._collate_fn, pin_memory=True
+        )
+
+class UnityDataset2(VisionDataset):
 
     def __init__(self, min_req=1, max_req=10, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,7 +262,7 @@ class UnityDataset(VisionDataset):
 
                 anno_3d = [
                     anno for anno in capture.annotations 
-                    if isinstance(anno, BoundingBox3DAnnotation)# and anno.labelName == 'phone'
+                    if isinstance(anno, BBox3DAnno)# and anno.labelName == 'phone'
                 ][0]
                 if len(anno_3d.values) == 0: break
                 r = R.from_quat(capture.rotation)

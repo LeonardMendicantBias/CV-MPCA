@@ -25,9 +25,7 @@ class MHCA(nn.Module):
         self.attention_weights = nn.Linear(embed_dim, len(cameras))
         self.output_proj = nn.Linear(embed_dim, embed_dim)
 
-        self.register_buffer('pc_range',
-            torch.tensor(pc_range, dtype=torch.float)
-        )
+        self.register_buffer('pc_range', torch.tensor(pc_range, dtype=torch.float))
 
         self._init_weight()
 
